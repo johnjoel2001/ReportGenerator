@@ -2,16 +2,19 @@ import streamlit as st
 import requests
 import json
 import pandas as pd
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import letter, A4
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.units import inch
-from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_JUSTIFY
 import io
 import base64
 from datetime import datetime
 import traceback
+import re
+
+# Using fpdf2 for better PDF generation (easier installation)
+try:
+    from fpdf import FPDF
+    FPDF_AVAILABLE = True
+except ImportError:
+    FPDF_AVAILABLE = False
+    st.error("FPDF2 not available. Please install with: pip install fpdf2")
 
 # API URLs with correct endpoints
 API_CONFIGS = {
@@ -37,125 +40,285 @@ API_CONFIGS = {
     }
 }
 
-class PDFReportGenerator:
+class CleanPDFReportGenerator:
     def __init__(self):
-        self.styles = getSampleStyleSheet()
+        self.pdf = FPDF()
+        self.pdf.set_auto_page_break(auto=True, margin=15)
         
-        # Custom styles
-        self.title_style = ParagraphStyle(
-            'CustomTitle',
-            parent=self.styles['Title'],
-            fontSize=24,
-            textColor=colors.darkblue,
-            alignment=TA_CENTER,
-            spaceAfter=30,
-            fontName='Helvetica-Bold'
-        )
+        # Colors
+        self.blue = (44, 90, 160)
+        self.red = (220, 53, 69)
+        self.green = (40, 167, 69)
+        self.gray = (108, 117, 125)
+        self.light_gray = (248, 249, 250)
         
-        self.section_header_style = ParagraphStyle(
-            'SectionHeader',
-            parent=self.styles['Heading1'],
-            fontSize=16,
-            textColor=colors.darkred,
-            spaceBefore=25,
-            spaceAfter=15,
-            fontName='Helvetica-Bold',
-            borderWidth=1,
-            borderColor=colors.darkred,
-            borderPadding=8,
-            backColor=colors.lightgrey
-        )
+    def clean_text(self, text):
+        """Clean and format text, handling asterisks and special characters"""
+        if not isinstance(text, str):
+            return str(text)
         
-        self.subsection_style = ParagraphStyle(
-            'SubSection',
-            parent=self.styles['Heading2'],
-            fontSize=14,
-            textColor=colors.darkblue,
-            spaceBefore=15,
-            spaceAfter=8,
-            fontName='Helvetica-Bold'
-        )
+        # Remove problematic characters
+        text = text.encode('ascii', 'ignore').decode('ascii')
         
-        self.normal_style = ParagraphStyle(
-            'CustomNormal',
-            parent=self.styles['Normal'],
-            fontSize=11,
-            alignment=TA_LEFT,
-            spaceAfter=8,
-            leftIndent=10
-        )
+        # Handle asterisks - convert to bullet points or emphasis
+        text = re.sub(r'\*\*\*+', '• ', text)
+        text = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)  # Remove double asterisks but keep content
+        text = re.sub(r'\*([^*]+)\*', r'\1', text)      # Remove single asterisks but keep content
         
-        self.highlight_style = ParagraphStyle(
-            'Highlight',
-            parent=self.styles['Normal'],
-            fontSize=12,
-            textColor=colors.darkred,
-            fontName='Helvetica-Bold',
-            spaceAfter=8,
-            leftIndent=10
-        )
-
-    def create_patient_info_table(self, patient_info):
-        """Create a nicely formatted patient information table"""
-        data = []
-        for key, value in patient_info.items():
-            formatted_key = key.replace('_', ' ').title()
-            data.append([formatted_key, str(value)])
+        # Add line breaks after numbered items (1., 2., 3., etc.)
+        text = re.sub(r'(\d+\.\s)', r'\n\1', text)
         
-        table = Table(data, colWidths=[2*inch, 3*inch])
-        table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (0, -1), colors.lightblue),
-            ('TEXTCOLOR', (0, 0), (0, -1), colors.black),
-            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-            ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
-            ('FONTNAME', (1, 0), (1, -1), 'Helvetica'),
-            ('FONTSIZE', (0, 0), (-1, -1), 10),
-            ('GRID', (0, 0), (-1, -1), 1, colors.black),
-            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-            ('ROWBACKGROUNDS', (0, 0), (-1, -1), [colors.white, colors.lightgrey])
-        ]))
-        return table
-
-    def create_semen_analysis_table(self, semen_data):
-        """Create a detailed semen analysis table"""
-        headers = ['Parameter', 'Value', 'Normal Range', 'Status']
-        data = [headers]
+        # Clean up multiple spaces but preserve line breaks
+        text = re.sub(r'[ \t]+', ' ', text)  # Replace multiple spaces/tabs with single space
+        text = re.sub(r'\n\s+', '\n', text)  # Remove spaces at beginning of new lines
+        text = text.strip()
         
-        for key, value in semen_data.items():
-            if key == 'comments':
+        return text
+    
+    def add_header(self):
+        """Add report header"""
+        self.pdf.add_page()
+        
+        # Title
+        self.pdf.set_font('Arial', 'B', 24)
+        self.pdf.set_text_color(*self.blue)
+        self.pdf.cell(0, 15, 'FERTILITY ANALYSIS REPORT', 0, 1, 'C')
+        
+        # Line under title
+        self.pdf.set_draw_color(*self.blue)
+        self.pdf.line(20, self.pdf.get_y(), 190, self.pdf.get_y())
+        self.pdf.ln(10)
+        
+        # Timestamp
+        self.pdf.set_font('Arial', '', 10)
+        self.pdf.set_text_color(*self.gray)
+        timestamp = f"Generated on: {datetime.now().strftime('%B %d, %Y at %I:%M %p')}"
+        self.pdf.cell(0, 5, timestamp, 0, 1, 'C')
+        self.pdf.ln(15)
+    
+    def add_section_header(self, title):
+        """Add a section header with colored background"""
+        self.pdf.ln(10)
+        
+        # Background rectangle
+        self.pdf.set_fill_color(*self.light_gray)
+        self.pdf.rect(10, self.pdf.get_y(), 190, 12, 'F')
+        
+        # Left border
+        self.pdf.set_fill_color(*self.red)
+        self.pdf.rect(10, self.pdf.get_y(), 3, 12, 'F')
+        
+        # Text
+        self.pdf.set_font('Arial', 'B', 14)
+        self.pdf.set_text_color(*self.red)
+        self.pdf.cell(0, 12, f"  {title}", 0, 1, 'L')
+        self.pdf.ln(5)
+    
+    def add_subsection_header(self, title):
+        """Add a subsection header"""
+        self.pdf.ln(5)
+        self.pdf.set_font('Arial', 'B', 12)
+        self.pdf.set_text_color(*self.blue)
+        self.pdf.cell(0, 8, title, 0, 1, 'L')
+        
+        # Underline
+        self.pdf.set_draw_color(*self.blue)
+        self.pdf.line(10, self.pdf.get_y(), 100, self.pdf.get_y())
+        self.pdf.ln(5)
+    
+    def add_info_table(self, data_dict, title=None):
+        """Add a two-column information table"""
+        if title:
+            self.add_subsection_header(title)
+        
+        self.pdf.set_font('Arial', '', 10)
+        
+        for key, value in data_dict.items():
+            # Clean the data
+            clean_key = self.clean_text(key.replace('_', ' ').title())
+            clean_value = self.clean_text(str(value))
+            
+            # Key column (bold)
+            self.pdf.set_font('Arial', 'B', 10)
+            self.pdf.set_text_color(0, 0, 0)
+            self.pdf.cell(60, 8, clean_key + ":", 1, 0, 'L')
+            
+            # Value column
+            self.pdf.set_font('Arial', '', 10)
+            self.pdf.cell(120, 8, clean_value, 1, 1, 'L')
+        
+        self.pdf.ln(5)
+    
+    def add_analysis_table(self, headers, data):
+        """Add analysis table with headers"""
+        # Table headers
+        self.pdf.set_font('Arial', 'B', 10)
+        self.pdf.set_fill_color(*self.blue)
+        self.pdf.set_text_color(255, 255, 255)
+        
+        col_widths = [50, 30, 40, 30] if len(headers) == 4 else [40, 30, 30, 30, 30]
+        
+        for i, header in enumerate(headers):
+            self.pdf.cell(col_widths[i], 10, header, 1, 0, 'C', True)
+        self.pdf.ln()
+        
+        # Table data
+        self.pdf.set_font('Arial', '', 9)
+        self.pdf.set_text_color(0, 0, 0)
+        
+        for row in data:
+            for i, cell in enumerate(row):
+                clean_cell = self.clean_text(str(cell))
+                
+                # Color code status
+                if i == len(row) - 1 and clean_cell in ['Low', 'High']:
+                    self.pdf.set_text_color(*self.red)
+                elif i == len(row) - 1 and clean_cell == 'Normal':
+                    self.pdf.set_text_color(*self.green)
+                else:
+                    self.pdf.set_text_color(0, 0, 0)
+                
+                self.pdf.cell(col_widths[i], 8, clean_cell, 1, 0, 'C')
+            self.pdf.ln()
+        
+        self.pdf.ln(5)
+    
+    def add_fertility_score_box(self, score):
+        """Add highlighted fertility score box"""
+        self.pdf.ln(5)
+        
+        # Score box
+        self.pdf.set_fill_color(255, 243, 205)  # Light yellow
+        self.pdf.set_draw_color(*self.red)
+        self.pdf.rect(10, self.pdf.get_y(), 190, 20, 'DF')
+        
+        # Score text
+        self.pdf.set_font('Arial', 'B', 16)
+        self.pdf.set_text_color(*self.red)
+        self.pdf.cell(0, 20, f"Predicted Fertility Score: {score}%", 0, 1, 'C')
+        self.pdf.ln(5)
+    
+    def add_interpretation_box(self):
+        """Add fertility score interpretation"""
+        self.pdf.set_fill_color(231, 243, 255)  # Light blue
+        self.pdf.set_draw_color(*self.blue)
+        self.pdf.rect(10, self.pdf.get_y(), 190, 25, 'DF')
+        
+        self.pdf.set_font('Arial', 'B', 10)
+        self.pdf.set_text_color(*self.blue)
+        self.pdf.cell(0, 8, "About the Fertility Score:", 0, 1, 'L')
+        
+        self.pdf.set_font('Arial', '', 9)
+        self.pdf.set_text_color(0, 0, 0)
+        text = "The fertility score percentage represents the estimated probability of achieving"
+        self.pdf.cell(0, 6, text, 0, 1, 'L')
+        text2 = "a natural pregnancy within 12 months, based on semen parameter analysis."
+        self.pdf.cell(0, 6, text2, 0, 1, 'L')
+        self.pdf.ln(10)
+    
+    def add_text_content(self, text, max_width=180):
+        """Add formatted text content with proper line breaks"""
+        if not text:
+            return
+            
+        clean_text = self.clean_text(text)
+        
+        # Split into paragraphs
+        paragraphs = clean_text.split('\n')
+        
+        self.pdf.set_font('Arial', '', 10)
+        self.pdf.set_text_color(0, 0, 0)
+        
+        for paragraph in paragraphs:
+            if not paragraph.strip():
                 continue
                 
-            param_name = key.replace('_', ' ').title()
+            # Handle bullet points
+            if paragraph.strip().startswith('•'):
+                self.pdf.cell(5, 6, '•', 0, 0, 'L')
+                paragraph = paragraph.strip()[1:].strip()
             
-            if isinstance(value, dict):
-                param_value = value.get('value', 'N/A')
-                normal_range = value.get('normal_range', 'N/A')
-                
-                # Determine status
-                status = self.determine_status(key, param_value, normal_range)
-                
-                data.append([param_name, str(param_value), str(normal_range), status])
-            else:
-                data.append([param_name, str(value), 'N/A', 'N/A'])
+            # Word wrap
+            words = paragraph.split()
+            line = ""
+            
+            for word in words:
+                test_line = f"{line} {word}".strip()
+                if self.pdf.get_string_width(test_line) <= max_width:
+                    line = test_line
+                else:
+                    if line:
+                        self.pdf.cell(0, 6, line, 0, 1, 'L')
+                    line = word
+            
+            if line:
+                self.pdf.cell(0, 6, line, 0, 1, 'L')
+            
+            self.pdf.ln(2)
+    
+    def add_recommendation_box(self, title, content):
+        """Add recommendation box with border"""
+        self.pdf.ln(5)
         
-        table = Table(data, colWidths=[2*inch, 1*inch, 1.5*inch, 1*inch])
-        table.setStyle(TableStyle([
-            # Header styling
-            ('BACKGROUND', (0, 0), (-1, 0), colors.darkblue),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, 0), 11),
-            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-            
-            # Data styling
-            ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
-            ('FONTSIZE', (0, 1), (-1, -1), 10),
-            ('GRID', (0, 0), (-1, -1), 1, colors.black),
-            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.lightgrey])
-        ]))
-        return table
-
+        # Box background
+        self.pdf.set_fill_color(*self.light_gray)
+        self.pdf.set_draw_color(*self.red)
+        
+        # Calculate box height based on content
+        y_start = self.pdf.get_y()
+        
+        # Title
+        self.pdf.set_font('Arial', 'B', 12)
+        self.pdf.set_text_color(*self.red)
+        self.pdf.cell(0, 10, title, 0, 1, 'L')
+        
+        # Content
+        self.pdf.set_x(15)
+        self.add_text_content(content, 175)
+        
+        y_end = self.pdf.get_y()
+        
+        # Draw box around content
+        self.pdf.rect(10, y_start, 190, y_end - y_start + 5, 'D')
+        self.pdf.ln(10)
+    
+    def add_physician_remarks_box(self):
+        """Add empty boxes for physician remarks - Internal and External"""
+        self.add_section_header("PHYSICIAN REMARKS")
+        
+        # Internal Remarks
+        self.add_subsection_header("Internal Remarks")
+        
+        # Internal remarks box
+        box_height = 60
+        self.pdf.set_draw_color(0, 0, 0)
+        self.pdf.rect(10, self.pdf.get_y(), 190, box_height, 'D')
+        
+        # Add lines for writing in internal box
+        y_start = self.pdf.get_y() + 8
+        for i in range(6):
+            y_pos = y_start + (i * 8)
+            if y_pos < self.pdf.get_y() + box_height - 8:
+                self.pdf.line(15, y_pos, 195, y_pos)
+        
+        self.pdf.ln(box_height + 10)
+        
+        # External Remarks
+        self.add_subsection_header("External Remarks")
+        
+        # External remarks box
+        self.pdf.set_draw_color(0, 0, 0)
+        self.pdf.rect(10, self.pdf.get_y(), 190, box_height, 'D')
+        
+        # Add lines for writing in external box
+        y_start = self.pdf.get_y() + 8
+        for i in range(6):
+            y_pos = y_start + (i * 8)
+            if y_pos < self.pdf.get_y() + box_height - 8:
+                self.pdf.line(15, y_pos, 195, y_pos)
+        
+        self.pdf.ln(box_height + 10)
+    
     def determine_status(self, param, value, normal_range):
         """Determine if parameter is normal, low, or high"""
         try:
@@ -164,7 +327,6 @@ class PDFReportGenerator:
             
             val = float(str(value).replace('%', ''))
             
-            # Simple status determination based on common patterns
             if 'motility' in param.lower() and val < 42:
                 return 'Low'
             elif 'concentration' in param.lower() and val < 16:
@@ -177,354 +339,108 @@ class PDFReportGenerator:
                 return 'Normal'
         except:
             return 'N/A'
-
-    def create_fertility_score_interpretation(self, fertility_score):
-        """Create fertility score interpretation section based on the score ranges"""
+    
+    def generate_report(self, all_results, filename="analysis_report.pdf"):
+        """Generate the complete PDF report"""
         
-        # About the Score explanation
-        about_style = ParagraphStyle(
-            'AboutScore',
-            parent=self.normal_style,
-            fontSize=11,
-            textColor=colors.darkblue,
-            backColor=colors.lightblue,
-            borderWidth=1,
-            borderColor=colors.darkblue,
-            borderPadding=10,
-            spaceAfter=15
-        )
+        # Header
+        self.add_header()
         
-        about_text = """About the Fertility Score: The fertility score percentage represents the estimated probability of achieving a natural pregnancy within 12 months, based on analysis of the semen parameters and clinical pregnancy outcome data."""
-        
-        about_para = Paragraph(about_text, about_style)
-        
-        # Recommendation based on score with better styling
-        recommendation_style = ParagraphStyle(
-            'RecommendationBox',
-            parent=self.normal_style,
-            fontSize=12,
-            textColor=colors.darkblue,
-            backColor=colors.lightgrey,
-            borderWidth=1,
-            borderColor=colors.darkblue,
-            borderPadding=12,
-            spaceAfter=15,
-            alignment=TA_CENTER,
-            fontName='Helvetica-Bold'
-        )
-        
-        if fertility_score < 20:
-            recommendation = "Below optimal fertility parameters. Consultation with fertility specialist recommended."
-        elif fertility_score < 40:
-            recommendation = "Below optimal fertility parameters. Consultation with fertility specialist recommended."
-        elif fertility_score < 60:
-            recommendation = "Moderate fertility parameters. Consider lifestyle modifications and monitoring."
-        elif fertility_score < 80:
-            recommendation = "Good fertility parameters. Continue current approach with monitoring."
-        else:
-            recommendation = "High fertility parameters. Optimal for natural conception attempts."
-        
-        recommendation_para = Paragraph(recommendation, recommendation_style)
-        
-        # Fertility Probability Score Table
-        table_title = Paragraph("Fertility Probability Score Table", self.subsection_style)
-        
-        # Create score ranges data
-        score_ranges = [
-            {
-                'range': '0-20%: Very Low Fertility Probability',
-                'description': '→ 0-20% chance of natural pregnancy within 12 months\n→ IVF with ICSI highly likely',
-                'color': colors.white
-            },
-            {
-                'range': '20-40%: Low Fertility Probability', 
-                'description': '→ 20-40% chance of natural pregnancy within 12 months\n→ IVF (with or without ICSI), depending on age and egg quality',
-                'color': colors.white
-            },
-            {
-                'range': '40-60%: Moderate Fertility Probability',
-                'description': '→ 40-60% chance of natural pregnancy within 12 months\n→ Consider IUI; may need supplements, lifestyle changes, or further testing',
-                'color': colors.white
-            },
-            {
-                'range': '60-80%: Good Fertility Probability',
-                'description': '→ 60-80% chance of natural pregnancy within 12 months\n→ Try naturally for 6-12 months or consider IUI if time-sensitive',
-                'color': colors.white
-            },
-            {
-                'range': '80-100%: High Fertility Probability',
-                'description': '→ 80-100% chance of natural pregnancy within 12 months\n→ Try timed intercourse and ovulation tracking',
-                'color': colors.white
-            }
-        ]
-        
-        # Highlight the relevant range based on fertility score
-        for score_range in score_ranges:
-            range_text = score_range['range']
-            if '0-20%' in range_text and fertility_score <= 20:
-                score_range['color'] = colors.lightyellow
-            elif '20-40%' in range_text and 20 < fertility_score <= 40:
-                score_range['color'] = colors.lightyellow
-            elif '40-60%' in range_text and 40 < fertility_score <= 60:
-                score_range['color'] = colors.lightyellow
-            elif '60-80%' in range_text and 60 < fertility_score <= 80:
-                score_range['color'] = colors.lightyellow
-            elif '80-100%' in range_text and fertility_score > 80:
-                score_range['color'] = colors.lightyellow
-        
-        # Create table data
-        table_data = []
-        for score_range in score_ranges:
-            # Create paragraphs for the table cells
-            range_para = Paragraph(f"<b>{score_range['range']}</b>", self.normal_style)
-            desc_para = Paragraph(score_range['description'], self.normal_style)
-            table_data.append([range_para, desc_para])
-        
-        # Create table
-        probability_table = Table(table_data, colWidths=[2.5*inch, 4*inch])
-        
-        # Apply styling
-        table_style_commands = [
-            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-            ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
-            ('FONTSIZE', (0, 0), (-1, -1), 10),
-            ('GRID', (0, 0), (-1, -1), 1, colors.black),
-            ('LEFTPADDING', (0, 0), (-1, -1), 8),
-            ('RIGHTPADDING', (0, 0), (-1, -1), 8),
-            ('TOPPADDING', (0, 0), (-1, -1), 8),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
-        ]
-        
-        # Highlight the appropriate row based on fertility score
-        for i, score_range in enumerate(score_ranges):
-            table_style_commands.append(('BACKGROUND', (0, i), (-1, i), score_range['color']))
-        
-        probability_table.setStyle(TableStyle(table_style_commands))
-        
-        return [about_para, Spacer(1, 10), recommendation_para, Spacer(1, 20), table_title, probability_table]
-
-    def format_text_with_line_breaks(self, text, style):
-        """Format long text with proper line breaks"""
-        if isinstance(text, str) and len(text) > 100:
-            # Split long text into paragraphs
-            sentences = text.split('. ')
-            formatted_sentences = []
-            
-            for sentence in sentences:
-                if sentence.strip():
-                    if not sentence.endswith('.'):
-                        sentence += '.'
-                    formatted_sentences.append(sentence.strip())
-            
-            # Join sentences with proper spacing
-            return [Paragraph(sent, style) for sent in formatted_sentences]
-        else:
-            return [Paragraph(str(text), style)]
-
-    def generate_report(self, all_results, filename="analysis_report.pdf", physician_remarks=""):
-        buffer = io.BytesIO()
-        doc = SimpleDocTemplate(buffer, pagesize=A4, topMargin=1*inch, bottomMargin=1*inch)
-        story = []
-
-        # Title Page
-        story.append(Paragraph("FERTILITY ANALYSIS REPORT", self.title_style))
-        story.append(Spacer(1, 20))
-        
-        # Timestamp
-        timestamp = Paragraph(f"Generated on: {datetime.now().strftime('%B %d, %Y at %I:%M %p')}", 
-                            self.normal_style)
-        story.append(timestamp)
-        story.append(Spacer(1, 40))
-
         # Patient Information Section
         if 'pdf_parsing' in all_results:
             pdf_data = all_results['pdf_parsing']
             
-            story.append(Paragraph("PATIENT INFORMATION", self.section_header_style))
+            self.add_section_header("PATIENT INFORMATION")
             
             if 'patient_info' in pdf_data:
-                patient_table = self.create_patient_info_table(pdf_data['patient_info'])
-                story.append(patient_table)
-                story.append(Spacer(1, 20))
+                self.add_info_table(pdf_data['patient_info'])
             
-            # Collection Information
             if 'collection_info' in pdf_data:
-                story.append(Paragraph("Collection Details", self.subsection_style))
-                collection_table = self.create_patient_info_table(pdf_data['collection_info'])
-                story.append(collection_table)
-                story.append(Spacer(1, 20))
+                self.add_info_table(pdf_data['collection_info'], "Collection Details")
             
             # Semen Analysis Results
             if 'semen_analysis' in pdf_data:
-                story.append(PageBreak())
-                story.append(Paragraph("SEMEN ANALYSIS RESULTS", self.section_header_style))
-                semen_table = self.create_semen_analysis_table(pdf_data['semen_analysis'])
-                story.append(semen_table)
-                story.append(Spacer(1, 20))
-
+                self.pdf.add_page()
+                self.add_section_header("SEMEN ANALYSIS RESULTS")
+                
+                # Prepare table data
+                headers = ['Parameter', 'Value', 'Normal Range', 'Status']
+                table_data = []
+                
+                for key, value in pdf_data['semen_analysis'].items():
+                    if key == 'comments':
+                        continue
+                    
+                    param_name = key.replace('_', ' ').title()
+                    
+                    if isinstance(value, dict):
+                        param_value = str(value.get('value', 'N/A'))
+                        normal_range = str(value.get('normal_range', 'N/A'))
+                        status = self.determine_status(key, param_value, normal_range)
+                        table_data.append([param_name, param_value, normal_range, status])
+                    else:
+                        table_data.append([param_name, str(value), 'N/A', 'N/A'])
+                
+                self.add_analysis_table(headers, table_data)
+        
         # Fertility Score & Recommendations
         if 'score_recommendations' in all_results:
-            story.append(PageBreak())
-            story.append(Paragraph("FERTILITY ASSESSMENT", self.section_header_style))
+            self.pdf.add_page()
+            self.add_section_header("FERTILITY ASSESSMENT")
             
             score_data = all_results['score_recommendations']
             
             # Fertility Score
             if 'fertility_score' in score_data:
                 fertility_score = score_data['fertility_score']
-                score_text = f"Predicted Fertility Score: {fertility_score}%"
-                story.append(Paragraph(score_text, self.highlight_style))
-                story.append(Spacer(1, 15))
-                
-                # Add the fertility score interpretation
-                interpretation_elements = self.create_fertility_score_interpretation(fertility_score)
-                for element in interpretation_elements:
-                    story.append(element)
-                
-                story.append(Spacer(1, 20))
+                self.add_fertility_score_box(fertility_score)
+                self.add_interpretation_box()
             
             # Features Analysis
             if 'features' in score_data:
-                story.append(Paragraph("Parameter Impact Analysis", self.subsection_style))
+                self.add_subsection_header("Parameter Impact Analysis")
                 
-                features = score_data['features']
-                feature_data = [['Parameter', 'Value', 'Impact', 'Direction', 'Strength']]
+                headers = ['Parameter', 'Value', 'Impact', 'Direction', 'Strength']
+                table_data = []
                 
-                for param, details in features.items():
+                for param, details in score_data['features'].items():
                     if isinstance(details, dict):
-                        value = details.get('value', 'N/A')
-                        impact = details.get('impact', 'N/A')
-                        direction = details.get('direction', 'N/A')
-                        strength = details.get('impact_strength', 'N/A')
-                        
-                        feature_data.append([param, str(value), str(impact)[:6], 
-                                          direction.title(), strength])
+                        value = str(details.get('value', 'N/A'))
+                        impact = str(details.get('impact', 'N/A'))[:6]
+                        direction = str(details.get('direction', 'N/A')).title()
+                        strength = str(details.get('impact_strength', 'N/A'))
+                        table_data.append([param, value, impact, direction, strength])
                 
-                feature_table = Table(feature_data, colWidths=[1.2*inch, 0.8*inch, 0.8*inch, 1*inch, 1*inch])
-                feature_table.setStyle(TableStyle([
-                    ('BACKGROUND', (0, 0), (-1, 0), colors.darkgreen),
-                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-                    ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-                    ('FONTSIZE', (0, 0), (-1, 0), 10),
-                    ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-                    ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
-                    ('FONTSIZE', (0, 1), (-1, -1), 9),
-                    ('GRID', (0, 0), (-1, -1), 1, colors.black),
-                    ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.lightgrey])
-                ]))
-                story.append(feature_table)
-                story.append(Spacer(1, 20))
+                self.add_analysis_table(headers, table_data)
             
-            # Recommendations - Keep together on same page
+            # Recommendations
             if 'recommendation' in score_data:
-                # Create a special red box style for Clinical Recommendations header
-                clinical_rec_style = ParagraphStyle(
-                    'ClinicalRecommendations',
-                    parent=self.styles['Heading1'],
-                    fontSize=16,
-                    textColor=colors.darkred,
-                    spaceBefore=25,
-                    spaceAfter=15,
-                    fontName='Helvetica-Bold',
-                    borderWidth=2,
-                    borderColor=colors.darkred,
-                    borderPadding=8,
-                    backColor=colors.lightgrey,
-                    alignment=TA_LEFT,
-                    keepWithNext=1  # Keep header with following content
-                )
-                
-                # Start a group to keep content together
-                rec_elements = []
-                rec_elements.append(Paragraph("CLINICAL RECOMMENDATIONS", clinical_rec_style))
-                
-                rec_text = score_data['recommendation']
-                
-                # Clean up the recommendation text
-                if isinstance(rec_text, str):
-                    # Remove excessive dashes and format properly
-                    rec_text = rec_text.replace('---', '').replace('**', '')
-                    
-                    # Split into sections and format
-                    sections = rec_text.split('- **')
-                    for section in sections:
-                        if section.strip():
-                            formatted_text = section.strip()
-                            paragraphs = self.format_text_with_line_breaks(formatted_text, self.normal_style)
-                            for para in paragraphs:
-                                rec_elements.append(para)
-                            rec_elements.append(Spacer(1, 8))
-                
-                # Add all recommendation elements at once to keep them together
-                for element in rec_elements:
-                    story.append(element)
-
+                self.add_recommendation_box("CLINICAL RECOMMENDATIONS", score_data['recommendation'])
+        
         # IUI-IVF Analysis
         if 'iui_ivf' in all_results:
-            story.append(PageBreak())
-            story.append(Paragraph("TREATMENT OPTIONS ANALYSIS", self.section_header_style))
+            self.pdf.add_page()
+            self.add_section_header("TREATMENT OPTIONS ANALYSIS")
             
             iui_data = all_results['iui_ivf']
             if 'explanation' in iui_data:
-                explanation = iui_data['explanation']
-                paragraphs = self.format_text_with_line_breaks(explanation, self.normal_style)
-                for para in paragraphs:
-                    story.append(para)
-                story.append(Spacer(1, 20))
-
+                self.add_text_content(iui_data['explanation'])
+        
         # Morphology Analysis
         if 'morphology' in all_results:
-            story.append(Paragraph("MORPHOLOGY ASSESSMENT", self.section_header_style))
+            self.add_section_header("MORPHOLOGY ASSESSMENT")
             
             morph_data = all_results['morphology']
             if 'recommendation' in morph_data:
-                recommendation = morph_data['recommendation']
-                paragraphs = self.format_text_with_line_breaks(recommendation, self.normal_style)
-                for para in paragraphs:
-                    story.append(para)
-
-        # Physician Remarks Section - UPDATED SECTION
-        story.append(Spacer(1, 20))
-        story.append(Paragraph("PHYSICIAN REMARKS", self.section_header_style))
+                self.add_text_content(morph_data['recommendation'])
         
-        # Create one large empty text box for handwritten remarks
-        textbox_data = [
-            [""],
-            [""],
-            [""],
-            [""],
-            [""],
-            [""],
-            [""],
-            [""],
-            [""],
-            [""]
-        ]
+        # Physician Remarks
+        self.add_physician_remarks_box()
         
-        textbox_table = Table(textbox_data, colWidths=[6.5*inch], rowHeights=[0.4*inch] * 10)
-        textbox_table.setStyle(TableStyle([
-            ('GRID', (0, 0), (-1, -1), 1, colors.black),
-            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-            ('LEFTPADDING', (0, 0), (-1, -1), 8),
-            ('RIGHTPADDING', (0, 0), (-1, -1), 8),
-            ('TOPPADDING', (0, 0), (-1, -1), 8),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
-        ]))
-        
-        story.append(textbox_table)
-        story.append(Spacer(1, 20))
+        # Return PDF as bytes
+        return bytes(self.pdf.output())
 
-        # Footer
-        # story.append(Spacer(1, 40))
-        # footer_text = "This report is generated for informational purposes. Please consult with your healthcare provider for medical advice."
-        # story.append(Paragraph(footer_text, self.normal_style))
-
-        # Build PDF
-        doc.build(story)
-        buffer.seek(0)
-        return buffer.getvalue()
-
+# Keep all the existing helper functions unchanged
 def test_api_endpoint(api_name, config):
     """Test API endpoint with different methods"""
     base_url = config['base_url']
@@ -879,6 +795,20 @@ def main():
     st.title("🔬 Medical Analysis Report Generator")
     st.markdown("Upload a PDF and get comprehensive analysis from multiple AI services")
     
+    # Check if FPDF2 is available
+    if not FPDF_AVAILABLE:
+        st.error("""
+        **FPDF2 is required for PDF generation but is not installed.**
+        
+        Please install it using:
+        ```
+        pip install fpdf2
+        ```
+        
+        This is much simpler than WeasyPrint and has no system dependencies!
+        """)
+        return
+    
     # Initialize session state for results
     if 'analysis_results' not in st.session_state:
         st.session_state.analysis_results = None
@@ -1073,43 +1003,33 @@ def main():
                 with tabs[i]:
                     st.json(result)
             
-            # Physician Remarks Section - NEW ADDITION
-            st.subheader("👨‍⚕️ Physician Remarks")
-            st.markdown("Add any additional clinical observations, recommendations, or notes:")
-            
-            # Text area for physician remarks
-            physician_remarks = st.text_area(
-                "Enter your remarks here:",
-                value=st.session_state.physician_remarks,
-                height=150,
-                placeholder="Enter clinical observations, additional recommendations, follow-up instructions, or any other relevant notes...",
-                help="These remarks will be included in the generated PDF report under the 'Physician Remarks' section."
-            )
-            
-            # Update session state when text changes
-            st.session_state.physician_remarks = physician_remarks
-            
-            # Generate PDF Report - This is now OUTSIDE the button condition
+            # Generate PDF Report
             st.subheader("📄 Generate Report")
             
             try:
-                pdf_generator = PDFReportGenerator()
-                pdf_bytes = pdf_generator.generate_report(all_results, physician_remarks=physician_remarks)
+                pdf_generator = CleanPDFReportGenerator()
+                pdf_bytes = pdf_generator.generate_report(all_results)
                 
-                # Create download button that persists
-                st.download_button(
-                    label="📥 Download Professional PDF Report",
-                    data=pdf_bytes,
-                    file_name=f"fertility_analysis_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
-                    mime="application/pdf",
-                    key="download_pdf"
-                )
-                
-                # Show a preview of what will be included
-                if physician_remarks.strip():
-                    st.info(f"✅ Physician remarks will be included in the report ({len(physician_remarks)} characters)")
-                else:
-                    st.info("ℹ️ No physician remarks added - the report will include a placeholder note")
+                if pdf_bytes:
+                    # Create download button
+                    st.download_button(
+                        label="📥 Download Clean PDF Report",
+                        data=pdf_bytes,
+                        file_name=f"fertility_analysis_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                        mime="application/pdf",
+                        key="download_pdf"
+                    )
+                    
+                    st.success("✅ PDF report generated successfully!")
+                    st.info("""
+                    **PDF Features:**
+                    - Clean, professional medical report layout
+                    - Properly formatted text (asterisks converted to bullet points)
+                    - Color-coded status indicators (Normal/Low/High)
+                    - Highlighted fertility scores and interpretations
+                    - Empty physician remarks box for handwritten notes
+                    - Easy to read tables and sections
+                    """)
                 
             except Exception as e:
                 st.error(f"Error generating PDF: {str(e)}")
